@@ -1,4 +1,6 @@
-from fastapi import FastAPI, Depends
+from urllib.request import Request
+
+from fastapi import FastAPI, Depends, Request, HTTPException, status
 from pydantic import BaseModel
 from fsrs import Scheduler, Card, Rating, ReviewLog, State
 from datetime import datetime, timezone
@@ -166,9 +168,16 @@ create_db_and_tables()
 
 
 
+
+
 # отдельный эндпоинт для получения следующей карточки
-@app.get("/api/tools/cards/next")
-def next_card(session: SessionDep):
+@app.get("/next")
+def next_card(session: SessionDep, request:Request):
+
+    print(request.headers.get("role"))
+
+
+
     statement = select(DatabaseCard).filter(DatabaseCard.due<datetime.now(timezone.utc))
     next_card = session.exec(statement).first()
     if (next_card == None):
@@ -188,7 +197,9 @@ def next_card(session: SessionDep):
 
 
 #карточка просмотрена и оценена. Эндпоинт возвращает следующую карточку, если она есть
-@app.post("/api/tools/cards/repetition")
+
+#@app.post("/api/tools/cards/repetition")
+@app.post("/repetition")
 def view_cards(requestBody:RatedCard, session: SessionDep):
 
 
@@ -236,8 +247,10 @@ def view_cards(requestBody:RatedCard, session: SessionDep):
 
 
 
-@app.post("/api/tools/cards/add")
-def add_card(requestBody:NewCard, session: SessionDep):
+#@app.post("/api/tools/cards/add")
+@app.post("/add")
+def add_card(requestBody:NewCard, session: SessionDep ):
+
     scheduler = Scheduler()
     # создаем дефолтную карту
     card = Card()
