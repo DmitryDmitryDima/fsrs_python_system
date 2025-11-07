@@ -5,7 +5,7 @@ from fastapi import FastAPI, Depends, Request, HTTPException, status
 from pydantic import BaseModel
 from fsrs import Scheduler, Card, Rating, ReviewLog, State
 from datetime import datetime, timezone
-from sqlmodel import Field, Session, SQLModel, create_engine, select, Column, DateTime
+from sqlmodel import Field, Session, SQLModel, create_engine, select, Column, DateTime, UniqueConstraint, col, Relationship
 from uuid import UUID, uuid4
 
 from typing import Annotated, Optional
@@ -34,16 +34,22 @@ class NewCard(BaseModel):
     front_content: str
     back_content: str
     with_reversed: bool
+    deck_id: int
 
 
 # dto для запроса на создание новой колоды
 class NewDeck(BaseModel):
     deck_name:str
 
+
+class DeleteDeckRequest(BaseModel):
+    deck_id:int
+
 class DeckDTO(BaseModel):
 
     deck_id: int
     deck_name: str
+    to_study: Optional[int] = None # сколько карточек доступно для изучения
 
 
 
@@ -55,9 +61,21 @@ class DeckDTO(BaseModel):
 
 # сущность колоды для таблицы
 class Deck(SQLModel, table=True):
+    __table_args__ = (
+        UniqueConstraint("deck_name", "user_uuid", name="deck_name_uuid"),
+    )
+
     deck_id:int | None = Field(default=None, primary_key=True)
     user_uuid:UUID
-    deck_name: str = Field(unique=True, nullable=False)
+    deck_name: str = Field(nullable=False)
+    last_update: datetime = Field(
+        sa_column=Column(
+            DateTime(timezone=True),
+            nullable=False
+        )
+    )
+
+    cards: list["DatabaseCard"] = Relationship(back_populates="deck", cascade_delete=True)
 
 
 # сущность карточки для таблицы
@@ -82,11 +100,12 @@ class DatabaseCard(SQLModel, table=True):
     front_content: str
     back_content: str
 
-    deck: int = Field(foreign_key="deck.deck_id")
+    deck_id: int = Field(foreign_key="deck.deck_id", ondelete="CASCADE")
+    deck: Deck | None = Relationship(back_populates="cards")
 
 
 
-def convertFsrsEntityToDbEntity(fsrsCard:Card, request_body:NewCard, reversed: bool):
+def convertFsrsEntityToDbEntity(fsrsCard:Card, request_body:NewCard, reversed = False):
     databaseCard = DatabaseCard()
     #databaseCard.card_id = fsrsCard.card_id
     databaseCard.state = fsrsCard.state.value
@@ -104,10 +123,20 @@ def convertFsrsEntityToDbEntity(fsrsCard:Card, request_body:NewCard, reversed: b
         databaseCard.back_content = request_body.back_content
     else:
         databaseCard.front_content = request_body.back_content
-        databaseCard.back_content = request_body.front__content
+        databaseCard.back_content = request_body.front_content
 
-    databaseCard.deck = request_body.deck
+    databaseCard.deck_id = request_body.deck_id
     return databaseCard
+
+
+def createDeck(session, name:str, uuid):
+    add_deck = Deck()
+    add_deck.deck_name = name
+    add_deck.user_uuid = uuid
+    add_deck.last_update = datetime.now(timezone.utc)
+
+    session.add(add_deck)
+    session.commit()
 
 
 def convertDbEntityToFsrsCardAndMakeReview(dbCard:DatabaseCard, rating:str)->DatabaseCard:
@@ -202,16 +231,65 @@ def getDecks(request:Request, session:SessionDep):
 
     user_uuid = request.headers.get("uuid")
 
-    statement = select(Deck).filter(Deck.user_uuid==user_uuid)
+    statement = select(Deck).filter(Deck.user_uuid==user_uuid).order_by(col(Deck.last_update).desc())
 
-    deck_list = session.exec(statement).all()
-
-    answer = [DeckDTO(deck_id = x.deck_id, deck_name =  x.deck_name) for x in deck_list]
+    try:
 
 
-    return answer
+        deck_list = session.exec(statement).all()
+
+            # если колод нет, мы создаем дефолтную колоду в базе данных
+        if len(deck_list) == 0:
+            createDeck(session, "default", user_uuid)
+            deck_list = session.exec(statement).all()
+
+        fetch_result = []
+        for deck_entity in deck_list:
+            deck_dto = DeckDTO(deck_id = deck_entity.deck_id,deck_name =  deck_entity.deck_name)
+            to_study = 0
+            for card_entity in deck_entity.cards:
+                if datetime.now(timezone.utc)>card_entity.due:
+                    to_study+=1
+            deck_dto.to_study = to_study
+            fetch_result.append(deck_dto)
 
 
+        return fetch_result
+
+
+    except Exception as exception:
+        print(exception)
+
+        raise HTTPException(status_code=500)
+
+
+
+
+
+
+
+# удаляем колоду
+# todo подумать над реализацией миграции в другую колоду
+@app.post("/deleteDeck")
+def deleteDeck(request:Request, body:DeleteDeckRequest, session:SessionDep):
+    role = request.headers.get("role")
+
+    user_uuid = UUID(request.headers.get("uuid"))
+    if (role != "ADMIN" and role != "USER"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    with session.begin():
+        # вытаскиваем колоду, проверяем, что она принадлежит авторизованному пользователю
+        deckSelectStatement = select(Deck).where(Deck.deck_id == body.deck_id)
+        foundDeck = session.exec(deckSelectStatement).first()
+        if (foundDeck == None):
+            raise HTTPException(status_code=400, detail="Колоды не существует")
+
+        if (foundDeck.user_uuid != user_uuid):
+            raise HTTPException(status=403, detail="Запрещенное действие")
+
+        session.delete(foundDeck)
+        session.commit()
 
 
 
@@ -230,12 +308,13 @@ def add_deck(request:Request, body:NewDeck, session:SessionDep):
 
     user_uuid = request.headers.get("uuid")
 
-    add_deck = Deck()
-    add_deck.deck_name = body.deck_name
-    add_deck.user_uuid = user_uuid
+    statement = select(Deck).where(Deck.user_uuid == UUID(user_uuid), Deck.deck_name==body.deck_name)
+    check = session.exec(statement).first()
 
-    session.add(add_deck)
-    session.commit()
+    if check is not None:
+        raise HTTPException(status_code=400, detail="Колода {} уже существует".format(body.deck_name))
+
+    createDeck(session, body.deck_name, user_uuid)
 
 
 
@@ -264,7 +343,7 @@ def next_card(session: SessionDep, request:Request, deck_id:int):
 
 
 
-    statement = select(DatabaseCard).filter(DatabaseCard.due<datetime.now(timezone.utc) and DatabaseCard.deck == deck_id)
+    statement = select(DatabaseCard).filter(DatabaseCard.due<datetime.now(timezone.utc), DatabaseCard.deck_id == deck_id)
     next_card = session.exec(statement).first()
     if (next_card == None):
         answer = BackendAnswerCard()
@@ -337,48 +416,52 @@ def view_cards(requestBody:RatedCard, session: SessionDep, request:Request):
 @app.post("/addCard")
 def add_card(requestBody:NewCard, session: SessionDep, request:Request):
     role = request.headers.get("role")
-    user_uuid = request.headers.get("uuid")
+    print(requestBody)
+    user_uuid = UUID(request.headers.get("uuid"))
     if (role != "ADMIN" and role != "USER"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
-    # вытаскиваем колоду, проверяем, что она принадлежит авторизованному пользователю
-    deckSelectStatement = select(Deck).where(Deck.deck_id == requestBody.deck_id)
-    foundDeck = session.exec(deckSelectStatement).first()
-    if (foundDeck == None):
-        raise HTTPException(status_code=400, detail="deck doesn't exists")
 
-    if (foundDeck.user_uuid != user_uuid):
-        raise HTTPException(status=403, detail="no permission for this id")
+    with session.begin():
+        # вытаскиваем колоду, проверяем, что она принадлежит авторизованному пользователю
+        deckSelectStatement = select(Deck).where(Deck.deck_id == requestBody.deck_id)
+        foundDeck = session.exec(deckSelectStatement).first()
+        if (foundDeck == None):
+            raise HTTPException(status_code=400, detail="deck doesn't exists")
 
-
-
+        if foundDeck.user_uuid != user_uuid:
 
 
+            raise HTTPException(status_code=403, detail="no permission for this id")
+
+        scheduler = Scheduler()
+        # создаем дефолтную карту
+        card = Card()
+        rating = Rating.Again
+
+        print(card)
+
+        card, review_log = scheduler.review_card(card, rating)
+
+        dbCard = convertFsrsEntityToDbEntity(card, requestBody)
+
+        session.add(dbCard)
+
+
+
+        if (requestBody.with_reversed):
+            dbCardReversed = convertFsrsEntityToDbEntity(card, requestBody, reversed=True)
+
+            session.add(dbCardReversed)
+
+
+
+        foundDeck.last_update = datetime.now(timezone.utc)
 
 
 
 
-    scheduler = Scheduler()
-    # создаем дефолтную карту
-    card = Card()
-    rating = Rating.Again
 
-    print(card)
-
-    card, review_log = scheduler.review_card(card, rating)
-
-    dbCard = convertFsrsEntityToDbEntity(card, requestBody)
-
-    session.add(dbCard)
-
-    session.commit()
-
-    if (requestBody.with_reversed):
-        dbCardReversed = convertFsrsEntityToDbEntity(card, requestBody, reversed = True)
-
-        session.add(dbCardReversed)
-
-        session.commit()
 
 
 if __name__=="__main__":
