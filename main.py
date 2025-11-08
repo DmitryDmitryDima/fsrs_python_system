@@ -20,7 +20,7 @@ app = FastAPI()
 class RatedCard(BaseModel):
     card_id: int
     rating: str
-    deck_id: int
+    #deck_id: int
 
 # dto для бэкенд ответа
 class BackendAnswerCard(BaseModel):
@@ -50,6 +50,7 @@ class DeckDTO(BaseModel):
     deck_id: int
     deck_name: str
     to_study: Optional[int] = None # сколько карточек доступно для изучения
+    cards_amount: Optional[int] = None # общее число карточек
 
 
 
@@ -251,6 +252,7 @@ def getDecks(request:Request, session:SessionDep):
                 if datetime.now(timezone.utc)>card_entity.due:
                     to_study+=1
             deck_dto.to_study = to_study
+            deck_dto.cards_amount = len(deck_entity.cards)
             fetch_result.append(deck_dto)
 
 
@@ -328,7 +330,7 @@ def next_card(session: SessionDep, request:Request, deck_id:int):
     if (role != "ADMIN" and role != "USER"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
-    user_uuid = request.headers.get("uuid")
+    user_uuid = UUID(request.headers.get("uuid"))
 
     # вытаскиваем колоду, проверяем, что она принадлежит авторизованному пользователю
     deckSelectStatement = select(Deck).where(Deck.deck_id == deck_id)
@@ -342,7 +344,7 @@ def next_card(session: SessionDep, request:Request, deck_id:int):
 
 
 
-
+    # проверка через после foundDeck.cards
     statement = select(DatabaseCard).filter(DatabaseCard.due<datetime.now(timezone.utc), DatabaseCard.deck_id == deck_id)
     next_card = session.exec(statement).first()
     if (next_card == None):
@@ -370,22 +372,18 @@ def view_cards(requestBody:RatedCard, session: SessionDep, request:Request):
     if (role != "ADMIN" and role != "USER"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
-    user_uuid = request.headers.get("uuid")
+    user_uuid = UUID(request.headers.get("uuid"))
 
-    # вытаскиваем колоду, проверяем, что она принадлежит авторизованному пользователю
-    deckSelectStatement = select(Deck).where(Deck.deck_id == requestBody.deck_id)
-    foundDeck = session.exec(deckSelectStatement).first()
-    if (foundDeck == None):
-        raise HTTPException(status_code=400, detail="deck doesn't exists")
 
-    if (foundDeck.user_uuid != user_uuid):
-        raise HTTPException(status=403, detail="no permission for this id")
 
 
 
 
     #получаем карточку по id
     dbCard = session.get(DatabaseCard, requestBody.card_id)
+
+    if dbCard.deck.user_uuid!=user_uuid:
+        raise HTTPException(status=403, detail="no permission for this id")
 
 
 
