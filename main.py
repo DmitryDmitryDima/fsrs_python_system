@@ -27,6 +27,7 @@ class BackendAnswerCard(BaseModel):
     card_id: Optional[int] = None
     front_content: Optional[str] = None
     back_content: Optional[str] = None
+    deck_id: Optional[int] = None
 
 
 # dto для запроса на создание новой карточки
@@ -37,6 +38,12 @@ class NewCard(BaseModel):
     deck_id: int
 
 
+class EditCard(BaseModel):
+    front_content: str
+    back_content: str
+    card_id: int
+
+
 # dto для запроса на создание новой колоды
 class NewDeck(BaseModel):
     deck_name:str
@@ -44,6 +51,9 @@ class NewDeck(BaseModel):
 
 class DeleteDeckRequest(BaseModel):
     deck_id:int
+
+class DeleteCardRequest(BaseModel):
+    card_id:int
 
 class DeckDTO(BaseModel):
 
@@ -320,11 +330,48 @@ def add_deck(request:Request, body:NewDeck, session:SessionDep):
 
 
 
+@app.post("/editCard")
+def edit_card(session: SessionDep, request:Request, request_body:EditCard):
+    role = request.headers.get("role")
+    if (role != "ADMIN" and role != "USER"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    user_uuid = UUID(request.headers.get("uuid"))
+
+
+
+
+
+@app.get("/getCard")
+def get_card_by_id(session: SessionDep, request:Request, card_id:int)->BackendAnswerCard:
+    role = request.headers.get("role")
+    if (role != "ADMIN" and role != "USER"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    user_uuid = UUID(request.headers.get("uuid"))
+
+    card_statement = select(DatabaseCard).where(DatabaseCard.card_id==card_id)
+
+    card_entity = session.exec(card_statement).first()
+
+    if card_entity is None: raise HTTPException(status_code=400, detail="card doesn't exists")
+
+    if card_entity.deck.user_uuid!=user_uuid:raise HTTPException(status_code=403, detail="no permission")
+
+    answer = BackendAnswerCard()
+    answer.back_content = card_entity.back_content
+    answer.front_content = card_entity.front_content
+    answer.card_id = card_entity.card_id
+    answer.deck_id = card_entity.deck.deck_id
+    return answer
+
+
+
 
 
 # отдельный эндпоинт для получения следующей карточки из колоды
 @app.get("/next/{deck_id}")
-def next_card(session: SessionDep, request:Request, deck_id:int):
+def next_card(session: SessionDep, request:Request, deck_id:int)->BackendAnswerCard:
 
     role = request.headers.get("role")
     if (role != "ADMIN" and role != "USER"):
@@ -345,6 +392,29 @@ def next_card(session: SessionDep, request:Request, deck_id:int):
 
 
     # проверка через после foundDeck.cards
+
+
+    for card in foundDeck.cards:
+        if card.due<datetime.now(timezone.utc):
+            answer = BackendAnswerCard()
+            answer.back_content = card.back_content
+            answer.front_content = card.front_content
+            answer.card_id = card.card_id
+            answer.deck_id = foundDeck.deck_id
+            return answer
+
+    answer = BackendAnswerCard()
+    answer.back_content = None
+    answer.front_content = None
+    answer.card_id = None
+    answer.deck_id = None
+    return answer
+
+
+
+
+
+    """
     statement = select(DatabaseCard).filter(DatabaseCard.due<datetime.now(timezone.utc), DatabaseCard.deck_id == deck_id)
     next_card = session.exec(statement).first()
     if (next_card == None):
@@ -359,6 +429,7 @@ def next_card(session: SessionDep, request:Request, deck_id:int):
         answer.front_content = next_card.front_content
         answer.card_id = next_card.card_id
         return answer
+    """
 
 
 
@@ -396,6 +467,36 @@ def view_cards(requestBody:RatedCard, session: SessionDep, request:Request):
     session.commit()
 
 
+
+
+
+
+
+
+
+
+@app.post("/deleteCard")
+def remove_card(request:Request, requestBody:DeleteCardRequest, session: SessionDep):
+    role = request.headers.get("role")
+
+    user_uuid = UUID(request.headers.get("uuid"))
+    if (role != "ADMIN" and role != "USER"):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    card_id = requestBody.card_id
+
+
+    # Проверяем, существует ли карта и принадлежит ли она пользователю
+    card_statement = select(DatabaseCard).where(DatabaseCard.card_id==card_id)
+    card_entity = session.exec(card_statement).first()
+
+    if card_entity == None: raise HTTPException(status_code = 400, detail = "card doesn't exists")
+
+    deck = card_entity.deck
+    if deck.user_uuid!=user_uuid: raise HTTPException(status_code = 403, detail = "no permission for this user")
+
+    session.delete(card_entity)
+    session.commit()
 
 
 
