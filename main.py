@@ -234,7 +234,7 @@ create_db_and_tables()
 # для наглядности можно возвращать количество доступных к изучению карточек
 
 #todo число карточек, доступных к изучению для каждой колоды
-@app.get("/getDecks")
+@app.get("/getDecks") 
 def getDecks(request:Request, session:SessionDep):
     role = request.headers.get("role")
     if (role != "ADMIN" and role != "USER"):
@@ -337,6 +337,21 @@ def edit_card(session: SessionDep, request:Request, request_body:EditCard):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
     user_uuid = UUID(request.headers.get("uuid"))
+
+    card_statement = select(DatabaseCard).where(DatabaseCard.card_id==request_body.card_id)
+
+    card_entity = session.exec(card_statement).first()
+
+    if card_entity is None: raise HTTPException(status_code=400, detail="card doesn't exists")
+
+    if card_entity.deck.user_uuid!=user_uuid:raise HTTPException(status_code=403, detail="no permission")
+
+    card_entity.front_content = request_body.front_content
+    card_entity.back_content = request_body.back_content
+
+    session.add(card_entity)
+    session.commit()
+
 
 
 
