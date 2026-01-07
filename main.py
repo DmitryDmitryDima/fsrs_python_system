@@ -526,7 +526,7 @@ def remove_card(request:Request, requestBody:DeleteCardRequest, session: Session
 
 
 
-#@app.post("/api/tools/cards/add")
+
 @app.post("/addCard")
 def add_card(requestBody:NewCard, session: SessionDep, request:Request):
     role = request.headers.get("role")
